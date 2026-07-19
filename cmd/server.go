@@ -25,7 +25,7 @@ var (
 var serverCommand = cobra.Command{
 	Use:   "server",
 	Short: "Run v2node server",
-	Run:   serverHandle,
+	RunE:  serverHandle,
 	Args:  cobra.NoArgs,
 }
 
@@ -39,18 +39,16 @@ func init() {
 	command.AddCommand(&serverCommand)
 }
 
-func serverHandle(_ *cobra.Command, _ []string) {
+func serverHandle(_ *cobra.Command, _ []string) error {
 	showVersion()
-	c := conf.New()
-	err := c.LoadFromPath(config)
+	c, envMode, err := loadConfig(config)
 	log.SetFormatter(&log.TextFormatter{
 		DisableTimestamp: true,
 		DisableQuote:     true,
 		PadLevelText:     false,
 	})
 	if err != nil {
-		log.WithField("err", err).Error("Load config file failed")
-		return
+		return fmt.Errorf("load configuration: %w", err)
 	}
 	switch c.LogConfig.Level {
 	case "debug":
@@ -66,8 +64,10 @@ func serverHandle(_ *cobra.Command, _ []string) {
 		f, err := os.OpenFile(c.LogConfig.Output, os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0644)
 		if err != nil {
 			log.WithField("err", err).Error("Open log file failed, using stdout instead")
+		} else {
+			defer f.Close()
+			log.SetOutput(f)
 		}
-		log.SetOutput(f)
 	}
 	// Enable pprof if configured
 	if c.PprofPort != 0 {
@@ -83,8 +83,7 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	//get node info
 	nodes, err := node.New(c.NodeConfigs)
 	if err != nil {
-		log.WithField("err", err).Error("Get node info failed")
-		return
+		return fmt.Errorf("get node info: %w", err)
 	}
 	log.Info("Got nodes info from server")
 	//core
@@ -93,18 +92,28 @@ func serverHandle(_ *cobra.Command, _ []string) {
 	v2core.ReloadCh = reloadCh
 	err = v2core.Start(nodes.NodeInfos)
 	if err != nil {
-		log.WithField("err", err).Error("Start core failed")
-		return
+		return fmt.Errorf("start core: %w", err)
 	}
-	defer v2core.Close()
 	//node
 	err = nodes.Start(c.NodeConfigs, v2core)
 	if err != nil {
-		log.WithField("err", err).Error("Run nodes failed")
-		return
+		_ = v2core.Close()
+		return fmt.Errorf("run nodes: %w", err)
 	}
+	defer func() {
+		if nodes != nil {
+			if err := nodes.Close(); err != nil {
+				log.WithField("err", err).Error("Close nodes failed")
+			}
+		}
+		if v2core != nil {
+			if err := v2core.Close(); err != nil {
+				log.WithField("err", err).Error("Close core failed")
+			}
+		}
+	}()
 	log.Info("Nodes started")
-	if watch {
+	if watch && !envMode {
 		// On file change, just signal reload; do not run reload concurrently here
 		err = c.Watch(config, func() {
 			select {
@@ -113,29 +122,46 @@ func serverHandle(_ *cobra.Command, _ []string) {
 			}
 		})
 		if err != nil {
-			log.WithField("err", err).Error("start watch failed")
-			return
+			return fmt.Errorf("start config watcher: %w", err)
 		}
+	} else if envMode {
+		log.Info("Environment configuration mode enabled; file watching disabled")
 	}
 	// clear memory
 	runtime.GC()
 
 	osSignals := make(chan os.Signal, 1)
 	signal.Notify(osSignals, syscall.SIGINT, syscall.SIGTERM)
+	defer signal.Stop(osSignals)
 
 	for {
 		select {
 		case <-osSignals:
 			log.Info("收到退出信号，正在关闭程序...")
-			os.Exit(0)
+			return nil
 		case <-reloadCh:
 			log.Info("收到重启信号，正在重新加载配置...")
 			if err := reload(config, &nodes, &v2core); err != nil {
-				log.WithField("err", err).Panic("重启失败")
+				return fmt.Errorf("reload: %w", err)
 			}
 			log.Info("重启成功")
 		}
 	}
+}
+
+func loadConfig(filePath string) (*conf.Conf, bool, error) {
+	c := conf.New()
+	envMode, err := c.LoadFromEnv()
+	if err != nil {
+		return nil, envMode, err
+	}
+	if envMode {
+		return c, true, nil
+	}
+	if err := c.LoadFromPath(filePath); err != nil {
+		return nil, false, err
+	}
+	return c, false, nil
 }
 
 func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
@@ -153,8 +179,8 @@ func reload(config string, nodes **node.Node, v2core **core.V2Core) error {
 		return err
 	}
 
-	newConf := conf.New()
-	if err := newConf.LoadFromPath(config); err != nil {
+	newConf, _, err := loadConfig(config)
+	if err != nil {
 		return err
 	}
 

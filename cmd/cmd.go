@@ -7,12 +7,15 @@ import (
 )
 
 var command = &cobra.Command{
-	Use: "v2node",
+	Use:           "v2node",
+	SilenceErrors: true,
+	SilenceUsage:  true,
 }
 
-func Run() {
+func Run() error {
 	err := command.Execute()
 	if err != nil {
 		log.WithField("err", err).Error("Execute command failed")
 	}
+	return err
 }
