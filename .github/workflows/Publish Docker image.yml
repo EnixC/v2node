@@ -14,7 +14,7 @@ permissions:
 
 env:
   REGISTRY: ghcr.io
-  IMAGE_NAME: ${{ github.repository_owner }}/v2node
+  IMAGE_NAME: enixc/v2node
 
 jobs:
   build:
