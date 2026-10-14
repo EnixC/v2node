@@ -8,7 +8,7 @@ RUN apk add --no-cache ca-certificates curl \
     && curl --fail --location --retry 3 --output /assets/geoip.dat "${GEOIP_URL}" \
     && curl --fail --location --retry 3 --output /assets/geosite.dat "${GEOSITE_URL}"
 
-FROM golang:1.26.1-alpine AS builder
+FROM golang:1.27.1-alpine AS builder
 
 ARG VERSION=dev
 
